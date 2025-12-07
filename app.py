@@ -4,6 +4,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import io
+import json
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Densa PHCU Reporting", layout="wide")
@@ -59,16 +60,19 @@ for group in METRICS_GROUPS.values():
 ALL_METRICS.append("Total CBHI (Auto)")
 
 
-# --- GOOGLE SHEET CONNECTION ---
+# --- GOOGLE SHEET CONNECTION (UPDATED TO USE json_key) ---
 @st.cache_data(ttl=3600) # Cache data for 1 hour
 def get_google_sheet():
     try:
-        # NOTE: The ServiceAccountCredentials.from_json_keyfile_dict function is extremely sensitive
-        # to the formatting of the private_key in secrets.toml. The formatting fix 
-        # in Step 1 is required for this to work.
+        # Load the entire service account JSON from the single 'json_key' field
+        json_info = json.loads(st.secrets["gcp_service_account"]["json_key"])
+        
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+        
+        # Use the dictionary directly for authorization
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(json_info, scope)
         client = gspread.authorize(creds)
+        
         sheet_url = st.secrets["private_gsheets_url"]["url"]
         sheet = client.open_by_url(sheet_url).sheet1
         return sheet
@@ -78,7 +82,7 @@ def get_google_sheet():
         st.stop()
 
 
-# --- MAIN APP LOGIC (NO LOGIN REQUIRED) ---
+# --- MAIN APP LOGIC (NOW PUBLICLY ACCESSIBLE) ---
 st.title("🏥 Densa PHCU Report System")
 page = st.sidebar.radio("Navigate", ["📝 Data Entry", "📊 Dashboard", "📈 CBHI Performance Report"])
 
