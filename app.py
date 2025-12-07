@@ -70,9 +70,8 @@ def password_entered():
     """Checks whether a password entered by the user is correct."""
     if st.session_state["username"] in USERS and st.session_state["password"] == USERS[st.session_state["username"]]:
         st.session_state["password_correct"] = True
-        # Store username upon successful login (Fixes the KeyError issue)
         st.session_state["logged_in_user"] = st.session_state["username"] 
-        del st.session_state["password"]  # don't store password
+        del st.session_state["password"] 
     else:
         st.session_state["password_correct"] = False
 
@@ -97,17 +96,20 @@ def check_password():
         return True
 
 # --- GOOGLE SHEET CONNECTION ---
-@st.cache_data(ttl=3600) # Cache data for 1 hour
+@st.cache_data(ttl=3600) 
 def get_google_sheet():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
         client = gspread.authorize(creds)
         sheet_url = st.secrets["private_gsheets_url"]["url"]
+        # Assuming the data is in the first sheet (sheet1)
         sheet = client.open_by_url(sheet_url).sheet1
         return sheet
     except Exception as e:
+        # Display a user-friendly error that points to the config issue
         st.error(f"❌ Connection Error: {e}")
+        st.error("Please check your Streamlit Secrets (`secrets.toml`) and ensure the private_key is correctly formatted with '\\n' escapes, and the service account has Editor access to the Google Sheet.")
         st.stop()
 
 # --- MAIN APP LOGIC ---
@@ -115,7 +117,6 @@ if check_password():
     
     # Sidebar Setup (Visible only after successful login)
     with st.sidebar:
-        # Check if logged_in_user is set before displaying (Fixes the KeyError)
         if 'logged_in_user' in st.session_state:
             st.success(f"👤 Logged in as: {st.session_state['logged_in_user']}")
         
@@ -123,7 +124,6 @@ if check_password():
         
         # Logout Button
         if st.button("Log Out"):
-            # Clear all session state variables related to login
             for key in ["password_correct", "username", "logged_in_user"]:
                 if key in st.session_state:
                     del st.session_state[key]
@@ -151,13 +151,11 @@ if check_password():
             with st.form("entry_form"):
                 data_values = {}
                 for category, indicators in METRICS_GROUPS.items():
-                    # Skip the Auto-calculated metric in the form
                     if "(Auto)" in category: continue 
 
                     st.subheader(f"🔹 {category}")
                     cols = st.columns(3)
                     for i, ind in enumerate(indicators):
-                        # Skip the Auto-calculated metric in the form
                         if ind == "Total CBHI (Auto)": continue
                         data_values[ind] = cols[i%3].number_input(ind, min_value=0, step=1)
                 
@@ -181,7 +179,6 @@ if check_password():
                             row_data.append(data_values.get(m, 0))
                         
                         sheet.append_row(row_data)
-                        # Clear cache to ensure dashboard sees the new data immediately
                         st.cache_data.clear() 
                         st.success(f"✅ Report Submitted! Total CBHI calculated: {total_cbhi}")
         else:
@@ -206,7 +203,6 @@ if check_password():
             with col1:
                 filter_inst = st.multiselect("Filter Institution", INSTITUTIONS)
             with col2:
-                # Placeholder for date filtering
                 pass 
 
             df_filtered = df
@@ -220,7 +216,7 @@ if check_password():
             st.subheader("📈 Aggregated Totals")
             st.info("This table shows the SUM of all reports currently displayed (filtered or total).")
             
-            sum_metrics = [m for m in ALL_METRICS if "money" not in m] # Exclude money fields from general summation
+            sum_metrics = [m for m in ALL_METRICS if "money" not in m] 
             
             numeric_df = df_filtered[sum_metrics]
             numeric_df = numeric_df.apply(pd.to_numeric, errors='coerce').fillna(0)
