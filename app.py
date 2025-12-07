@@ -64,12 +64,15 @@ ALL_METRICS.append("Total CBHI (Auto)")
 @st.cache_data(ttl=3600) # Cache data for 1 hour
 def get_google_sheet():
     try:
-        # Load the entire service account JSON from the single 'json_key' field
+        import json # Crucial import
+        
+        # USE THE NEW SINGLE JSON KEY from secrets.toml
+        # This line reads the large JSON string from secrets and converts it to a Python dictionary
         json_info = json.loads(st.secrets["gcp_service_account"]["json_key"])
         
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         
-        # Use the dictionary directly for authorization
+        # Use the dictionary directly for authorization, which avoids all stream/key errors
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json_info, scope)
         client = gspread.authorize(creds)
         
@@ -80,7 +83,6 @@ def get_google_sheet():
         # We handle the error here for better user feedback
         st.error(f"❌ Connection Error: {e}. Check Streamlit Secrets and Google Sheet sharing.")
         st.stop()
-
 
 # --- MAIN APP LOGIC (NOW PUBLICLY ACCESSIBLE) ---
 st.title("🏥 Densa PHCU Report System")
