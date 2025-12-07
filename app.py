@@ -9,7 +9,6 @@ import io
 st.set_page_config(page_title="Densa PHCU Reporting", layout="wide")
 
 # --- 🔒 SECURITY CONFIGURATION ---
-# Users requested:
 USERS = {
     "Admin": "admin1234",    # Administrator
     "Densa": "densa1234"     # Standard User
@@ -63,33 +62,42 @@ METRICS_GROUPS = {
 ALL_METRICS = []
 for group in METRICS_GROUPS.values():
     ALL_METRICS.extend(group)
-# NOTE: Add the new automatically calculated metric here
 ALL_METRICS.append("Total CBHI (Auto)")
 
 
 # --- AUTHENTICATION FUNCTIONS ---
+def password_entered():
+    """Checks whether a password entered by the user is correct."""
+    if st.session_state["username"] in USERS and st.session_state["password"] == USERS[st.session_state["username"]]:
+        st.session_state["password_correct"] = True
+        # Store username upon successful login (Fixes the KeyError issue)
+        st.session_state["logged_in_user"] = st.session_state["username"] 
+        del st.session_state["password"]  # don't store password
+    else:
+        st.session_state["password_correct"] = False
+
 def check_password():
     """Returns `True` if the user had a correct password."""
-    def password_entered():
-        if st.session_state["username"] in USERS and st.session_state["password"] == USERS[st.session_state["username"]]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show login form in the sidebar
+    with st.sidebar:
+        st.header("🔑 Login")
+        st.text_input("Username", key="username")
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        st.button("Log In") 
 
     if "password_correct" not in st.session_state:
-        st.text_input("Username", key="username")
-        st.text_input("Password", type="password", on_change=password_entered, key="password")
         return False
     elif not st.session_state["password_correct"]:
-        st.text_input("Username", key="username")
-        st.text_input("Password", type="password", on_change=password_entered, key="password")
-        st.error("😕 User not known or password incorrect")
+        st.sidebar.error("😕 User not known or password incorrect")
         return False
     else:
         return True
 
 # --- GOOGLE SHEET CONNECTION ---
+@st.cache_data(ttl=3600) # Cache data for 1 hour
 def get_google_sheet():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -105,11 +113,21 @@ def get_google_sheet():
 # --- MAIN APP LOGIC ---
 if check_password():
     
-    # Sidebar Setup
-    st.sidebar.success(f"👤 Logged in as: {st.session_state['username']}")
-    if st.sidebar.button("Log Out"):
-        del st.session_state["password_correct"]
-        st.rerun()
+    # Sidebar Setup (Visible only after successful login)
+    with st.sidebar:
+        # Check if logged_in_user is set before displaying (Fixes the KeyError)
+        if 'logged_in_user' in st.session_state:
+            st.success(f"👤 Logged in as: {st.session_state['logged_in_user']}")
+        
+        st.markdown("---")
+        
+        # Logout Button
+        if st.button("Log Out"):
+            # Clear all session state variables related to login
+            for key in ["password_correct", "username", "logged_in_user"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
 
     st.title("🏥 Densa PHCU Report System")
     page = st.sidebar.radio("Navigate", ["📝 Data Entry", "📊 Dashboard", "📈 CBHI Performance Report"])
@@ -133,9 +151,14 @@ if check_password():
             with st.form("entry_form"):
                 data_values = {}
                 for category, indicators in METRICS_GROUPS.items():
+                    # Skip the Auto-calculated metric in the form
+                    if "(Auto)" in category: continue 
+
                     st.subheader(f"🔹 {category}")
                     cols = st.columns(3)
                     for i, ind in enumerate(indicators):
+                        # Skip the Auto-calculated metric in the form
+                        if ind == "Total CBHI (Auto)": continue
                         data_values[ind] = cols[i%3].number_input(ind, min_value=0, step=1)
                 
                 submitted = st.form_submit_button("Submit Report")
@@ -158,6 +181,8 @@ if check_password():
                             row_data.append(data_values.get(m, 0))
                         
                         sheet.append_row(row_data)
+                        # Clear cache to ensure dashboard sees the new data immediately
+                        st.cache_data.clear() 
                         st.success(f"✅ Report Submitted! Total CBHI calculated: {total_cbhi}")
         else:
             st.warning("⚠️ Enter Name and Phone to enable the form.")
@@ -175,10 +200,8 @@ if check_password():
         df = pd.DataFrame(data)
         
         if not df.empty:
-            # Data Cleanup/Conversion
-            df.columns = [c.strip() for c in df.columns] # Clean headers
+            df.columns = [c.strip() for c in df.columns] 
             
-            # Filters
             col1, col2 = st.columns(2)
             with col1:
                 filter_inst = st.multiselect("Filter Institution", INSTITUTIONS)
@@ -197,8 +220,7 @@ if check_password():
             st.subheader("📈 Aggregated Totals")
             st.info("This table shows the SUM of all reports currently displayed (filtered or total).")
             
-            # Identify columns for summation
-            sum_metrics = [m for m in ALL_METRICS if "money" not in m and "(Auto)" not in m] + ["Total CBHI (Auto)"]
+            sum_metrics = [m for m in ALL_METRICS if "money" not in m] # Exclude money fields from general summation
             
             numeric_df = df_filtered[sum_metrics]
             numeric_df = numeric_df.apply(pd.to_numeric, errors='coerce').fillna(0)
@@ -206,7 +228,6 @@ if check_password():
             total_row = numeric_df.sum().to_frame(name="TOTAL SUM")
             st.table(total_row)
             
-            # Download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_filtered.to_excel(writer, index=False)
@@ -221,7 +242,6 @@ if check_password():
         st.header("CBHI Performance Analysis (Plan vs. Achievement)")
         st.info("This report aggregates all submitted data to measure performance against the static plan.")
 
-        # Load & Clean Data
         sheet = get_google_sheet()
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
@@ -236,7 +256,6 @@ if check_password():
             "CBHI membership renewal (free)", "CBHI new membership"
         ]
         
-        # Convert to numeric, then group by institution and sum the achievements
         df_achieved = df.copy()
         df_achieved[cbhi_achievement_cols] = df_achieved[cbhi_achievement_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
         
@@ -261,12 +280,9 @@ if check_password():
         # 3. MERGE AND CALCULATE
         df_final = pd.merge(plan_data, df_aggregated, on='Institution', how='left').fillna(0)
         
-        # --- Total Plan and Total Achievement ---
         df_final['Total Plan'] = df_final['Plan Higher Paid'] + df_final['Plan Medium Paid'] + df_final['Plan Free'] + df_final['Plan New Membership']
         df_final['Total Achieved'] = df_final['Achieved Higher Paid'] + df_final['Achieved Medium Paid'] + df_final['Achieved Free'] + df_final['Achieved New Membership']
 
-        # --- Performance % Calculation ---
-        # Calculation: (Total Achieved / Total Plan) * 100
         df_final['Performance %'] = (df_final['Total Achieved'] / df_final['Total Plan']) * 100
         df_final['Performance %'] = df_final['Performance %'].apply(lambda x: f"{x:,.1f}%")
 
@@ -278,7 +294,6 @@ if check_password():
         
         st.dataframe(df_final[display_cols], use_container_width=True)
         
-        # Download
         csv = df_final.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download CBHI Performance Report",
