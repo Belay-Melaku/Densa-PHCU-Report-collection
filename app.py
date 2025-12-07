@@ -8,12 +8,6 @@ import io
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Densa PHCU Reporting", layout="wide")
 
-# --- 🔒 SECURITY CONFIGURATION ---
-USERS = {
-    "Admin": "admin1234",    # Administrator
-    "Densa": "densa1234"     # Standard User
-}
-
 # --- CBHI PLAN DATA (STATIC) ---
 # Plan for [higher paid, medium paid, free, new membership]
 CBHI_PLAN = {
@@ -65,235 +59,192 @@ for group in METRICS_GROUPS.values():
 ALL_METRICS.append("Total CBHI (Auto)")
 
 
-# --- AUTHENTICATION FUNCTIONS ---
-def password_entered():
-    """Checks whether a password entered by the user is correct."""
-    if st.session_state["username"] in USERS and st.session_state["password"] == USERS[st.session_state["username"]]:
-        st.session_state["password_correct"] = True
-        st.session_state["logged_in_user"] = st.session_state["username"] 
-        del st.session_state["password"] 
-    else:
-        st.session_state["password_correct"] = False
-
-def check_password():
-    """Returns `True` if the user had a correct password."""
-    if st.session_state.get("password_correct", False):
-        return True
-
-    # Show login form in the sidebar
-    with st.sidebar:
-        st.header("🔑 Login")
-        st.text_input("Username", key="username")
-        st.text_input("Password", type="password", on_change=password_entered, key="password")
-        st.button("Log In") 
-
-    if "password_correct" not in st.session_state:
-        return False
-    elif not st.session_state["password_correct"]:
-        st.sidebar.error("😕 User not known or password incorrect")
-        return False
-    else:
-        return True
-
 # --- GOOGLE SHEET CONNECTION ---
-@st.cache_data(ttl=3600) 
+@st.cache_data(ttl=3600) # Cache data for 1 hour
 def get_google_sheet():
     try:
+        # NOTE: The ServiceAccountCredentials.from_json_keyfile_dict function is extremely sensitive
+        # to the formatting of the private_key in secrets.toml. The formatting fix 
+        # in Step 1 is required for this to work.
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
         client = gspread.authorize(creds)
         sheet_url = st.secrets["private_gsheets_url"]["url"]
-        # Assuming the data is in the first sheet (sheet1)
         sheet = client.open_by_url(sheet_url).sheet1
         return sheet
     except Exception as e:
-        # Display a user-friendly error that points to the config issue
-        st.error(f"❌ Connection Error: {e}")
-        st.error("Please check your Streamlit Secrets (`secrets.toml`) and ensure the private_key is correctly formatted with '\\n' escapes, and the service account has Editor access to the Google Sheet.")
+        # We handle the error here for better user feedback
+        st.error(f"❌ Connection Error: {e}. Check Streamlit Secrets and Google Sheet sharing.")
         st.stop()
 
-# --- MAIN APP LOGIC ---
-if check_password():
+
+# --- MAIN APP LOGIC (NO LOGIN REQUIRED) ---
+st.title("🏥 Densa PHCU Report System")
+page = st.sidebar.radio("Navigate", ["📝 Data Entry", "📊 Dashboard", "📈 CBHI Performance Report"])
+
+# ==========================================
+# PAGE 1: DATA ENTRY
+# ==========================================
+if page == "📝 Data Entry":
+    st.header("Daily Activity Form")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        report_date = st.date_input("Date of Report")
+    with col2:
+        reporter_name = st.text_input("Reporter Name (Required)")
+    with col3:
+        reporter_phone = st.text_input("Reporter Phone (Required)")
+        
+    institution = st.selectbox("Select Health Institution", INSTITUTIONS)
     
-    # Sidebar Setup (Visible only after successful login)
-    with st.sidebar:
-        if 'logged_in_user' in st.session_state:
-            st.success(f"👤 Logged in as: {st.session_state['logged_in_user']}")
-        
-        st.markdown("---")
-        
-        # Logout Button
-        if st.button("Log Out"):
-            for key in ["password_correct", "username", "logged_in_user"]:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
+    if reporter_name and reporter_phone:
+        with st.form("entry_form"):
+            data_values = {}
+            for category, indicators in METRICS_GROUPS.items():
+                st.subheader(f"🔹 {category}")
+                cols = st.columns(3)
+                for i, ind in enumerate(indicators):
+                    # Skip the Auto-calculated metric in the form
+                    if ind == "Total CBHI (Auto)": continue
+                    data_values[ind] = cols[i%3].number_input(ind, min_value=0, step=1)
+            
+            submitted = st.form_submit_button("Submit Report")
+            
+            if submitted:
+                with st.spinner("Saving to Google Sheet..."):
+                    # --- CALCULATION: Total CBHI (Sum of 4 membership types) ---
+                    total_cbhi = (
+                        data_values.get("CBHI membership renewal (higher paid)", 0) +
+                        data_values.get("CBHI membership renewal (medium paid)", 0) +
+                        data_values.get("CBHI membership renewal (free)", 0) +
+                        data_values.get("CBHI new membership", 0)
+                    )
+                    data_values["Total CBHI (Auto)"] = total_cbhi
+                    # -----------------------------------------------------------
 
-    st.title("🏥 Densa PHCU Report System")
-    page = st.sidebar.radio("Navigate", ["📝 Data Entry", "📊 Dashboard", "📈 CBHI Performance Report"])
+                    sheet = get_google_sheet()
+                    row_data = [str(report_date), reporter_name, reporter_phone, institution, str(datetime.now())]
+                    for m in ALL_METRICS:
+                        row_data.append(data_values.get(m, 0))
+                    
+                    sheet.append_row(row_data)
+                    # Clear cache to ensure dashboard sees the new data immediately
+                    st.cache_data.clear() 
+                    st.success(f"✅ Report Submitted! Total CBHI calculated: {total_cbhi}")
+    else:
+        st.warning("⚠️ Enter Name and Phone to enable the form.")
 
-    # ==========================================
-    # PAGE 1: DATA ENTRY
-    # ==========================================
-    if page == "📝 Data Entry":
-        st.header("Daily Activity Form")
-        col1, col2, col3 = st.columns(3)
+# ==========================================
+# PAGE 2: GENERAL DASHBOARD
+# ==========================================
+elif page == "📊 Dashboard":
+    st.header("General Daily Report Dashboard")
+    if st.button("🔄 Refresh Data"):
+        st.cache_data.clear()
+
+    sheet = get_google_sheet()
+    data = sheet.get_all_records()
+    df = pd.DataFrame(data)
+    
+    if not df.empty:
+        df.columns = [c.strip() for c in df.columns] 
+        
+        col1, col2 = st.columns(2)
         with col1:
-            report_date = st.date_input("Date of Report")
+            filter_inst = st.multiselect("Filter Institution", INSTITUTIONS)
         with col2:
-            reporter_name = st.text_input("Reporter Name (Required)")
-        with col3:
-            reporter_phone = st.text_input("Reporter Phone (Required)")
-            
-        institution = st.selectbox("Select Health Institution", INSTITUTIONS)
+            # Placeholder for date filtering
+            pass 
+
+        df_filtered = df
+        if filter_inst:
+            df_filtered = df[df['Institution'].isin(filter_inst)]
+
+        st.dataframe(df_filtered, use_container_width=True)
+
+        # --- AUTOMATIC SUMMATION ---
+        st.markdown("---")
+        st.subheader("📈 Aggregated Totals")
+        st.info("This table shows the SUM of all reports currently displayed (filtered or total).")
         
-        if reporter_name and reporter_phone:
-            with st.form("entry_form"):
-                data_values = {}
-                for category, indicators in METRICS_GROUPS.items():
-                    if "(Auto)" in category: continue 
-
-                    st.subheader(f"🔹 {category}")
-                    cols = st.columns(3)
-                    for i, ind in enumerate(indicators):
-                        if ind == "Total CBHI (Auto)": continue
-                        data_values[ind] = cols[i%3].number_input(ind, min_value=0, step=1)
-                
-                submitted = st.form_submit_button("Submit Report")
-                
-                if submitted:
-                    with st.spinner("Saving to Google Sheet..."):
-                        # --- CALCULATION: Total CBHI (Sum of 4 membership types) ---
-                        total_cbhi = (
-                            data_values.get("CBHI membership renewal (higher paid)", 0) +
-                            data_values.get("CBHI membership renewal (medium paid)", 0) +
-                            data_values.get("CBHI membership renewal (free)", 0) +
-                            data_values.get("CBHI new membership", 0)
-                        )
-                        data_values["Total CBHI (Auto)"] = total_cbhi
-                        # -----------------------------------------------------------
-
-                        sheet = get_google_sheet()
-                        row_data = [str(report_date), reporter_name, reporter_phone, institution, str(datetime.now())]
-                        for m in ALL_METRICS:
-                            row_data.append(data_values.get(m, 0))
-                        
-                        sheet.append_row(row_data)
-                        st.cache_data.clear() 
-                        st.success(f"✅ Report Submitted! Total CBHI calculated: {total_cbhi}")
-        else:
-            st.warning("⚠️ Enter Name and Phone to enable the form.")
-
-    # ==========================================
-    # PAGE 2: GENERAL DASHBOARD
-    # ==========================================
-    elif page == "📊 Dashboard":
-        st.header("General Daily Report Dashboard")
-        if st.button("🔄 Refresh Data"):
-            st.cache_data.clear()
-
-        sheet = get_google_sheet()
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
+        sum_metrics = [m for m in ALL_METRICS if "money" not in m] # Exclude money fields from general summation
         
-        if not df.empty:
-            df.columns = [c.strip() for c in df.columns] 
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                filter_inst = st.multiselect("Filter Institution", INSTITUTIONS)
-            with col2:
-                pass 
-
-            df_filtered = df
-            if filter_inst:
-                df_filtered = df[df['Institution'].isin(filter_inst)]
-
-            st.dataframe(df_filtered, use_container_width=True)
-
-            # --- AUTOMATIC SUMMATION ---
-            st.markdown("---")
-            st.subheader("📈 Aggregated Totals")
-            st.info("This table shows the SUM of all reports currently displayed (filtered or total).")
-            
-            sum_metrics = [m for m in ALL_METRICS if "money" not in m] 
-            
-            numeric_df = df_filtered[sum_metrics]
-            numeric_df = numeric_df.apply(pd.to_numeric, errors='coerce').fillna(0)
-            
-            total_row = numeric_df.sum().to_frame(name="TOTAL SUM")
-            st.table(total_row)
-            
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_filtered.to_excel(writer, index=False)
-            st.download_button("📥 Download Report as Excel", data=output.getvalue(), file_name="Densa_Report.xlsx")
-        else:
-            st.info("No data found.")
-
-    # ==========================================
-    # PAGE 3: CBHI PERFORMANCE REPORT
-    # ==========================================
-    elif page == "📈 CBHI Performance Report":
-        st.header("CBHI Performance Analysis (Plan vs. Achievement)")
-        st.info("This report aggregates all submitted data to measure performance against the static plan.")
-
-        sheet = get_google_sheet()
-        data = sheet.get_all_records()
-        df = pd.DataFrame(data)
+        numeric_df = df_filtered[sum_metrics]
+        numeric_df = numeric_df.apply(pd.to_numeric, errors='coerce').fillna(0)
         
-        if df.empty:
-            st.warning("No data submitted yet to generate the performance report.")
-            st.stop()
+        total_row = numeric_df.sum().to_frame(name="TOTAL SUM")
+        st.table(total_row)
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df_filtered.to_excel(writer, index=False)
+        st.download_button("📥 Download Report as Excel", data=output.getvalue(), file_name="Densa_Report.xlsx")
+    else:
+        st.info("No data found.")
 
-        # 1. AGGREGATE ACHIEVEMENT (SUM)
-        cbhi_achievement_cols = [
-            "CBHI membership renewal (higher paid)", "CBHI membership renewal (medium paid)", 
-            "CBHI membership renewal (free)", "CBHI new membership"
-        ]
-        
-        df_achieved = df.copy()
-        df_achieved[cbhi_achievement_cols] = df_achieved[cbhi_achievement_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
-        
-        df_aggregated = df_achieved.groupby('Institution')[cbhi_achievement_cols].sum().reset_index()
-        df_aggregated.rename(columns={
-            'CBHI membership renewal (higher paid)': 'Achieved Higher Paid',
-            'CBHI membership renewal (medium paid)': 'Achieved Medium Paid',
-            'CBHI membership renewal (free)': 'Achieved Free',
-            'CBHI new membership': 'Achieved New Membership'
-        }, inplace=True)
+# ==========================================
+# PAGE 3: CBHI PERFORMANCE REPORT
+# ==========================================
+elif page == "📈 CBHI Performance Report":
+    st.header("CBHI Performance Analysis (Plan vs. Achievement)")
+    st.info("This report aggregates all submitted data to measure performance against the static plan.")
 
-        # 2. PREPARE PLAN DATA
-        plan_data = pd.DataFrame([
-            {'Institution': k, 
-             'Plan Higher Paid': v['higher paid'],
-             'Plan Medium Paid': v['medium paid'],
-             'Plan Free': v['free'],
-             'Plan New Membership': v['new membership']}
-            for k, v in CBHI_PLAN.items()
-        ])
-        
-        # 3. MERGE AND CALCULATE
-        df_final = pd.merge(plan_data, df_aggregated, on='Institution', how='left').fillna(0)
-        
-        df_final['Total Plan'] = df_final['Plan Higher Paid'] + df_final['Plan Medium Paid'] + df_final['Plan Free'] + df_final['Plan New Membership']
-        df_final['Total Achieved'] = df_final['Achieved Higher Paid'] + df_final['Achieved Medium Paid'] + df_final['Achieved Free'] + df_final['Achieved New Membership']
+    sheet = get_google_sheet()
+    data = sheet.get_all_records()
+    df = pd.DataFrame(data)
+    
+    if df.empty:
+        st.warning("No data submitted yet to generate the performance report.")
+        st.stop()
 
-        df_final['Performance %'] = (df_final['Total Achieved'] / df_final['Total Plan']) * 100
-        df_final['Performance %'] = df_final['Performance %'].apply(lambda x: f"{x:,.1f}%")
+    # 1. AGGREGATE ACHIEVEMENT (SUM)
+    cbhi_achievement_cols = [
+        "CBHI membership renewal (higher paid)", "CBHI membership renewal (medium paid)", 
+        "CBHI membership renewal (free)", "CBHI new membership"
+    ]
+    
+    df_achieved = df.copy()
+    df_achieved[cbhi_achievement_cols] = df_achieved[cbhi_achievement_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+    
+    df_aggregated = df_achieved.groupby('Institution')[cbhi_achievement_cols].sum().reset_index()
+    df_aggregated.rename(columns={
+        'CBHI membership renewal (higher paid)': 'Achieved Higher Paid',
+        'CBHI membership renewal (medium paid)': 'Achieved Medium Paid',
+        'CBHI membership renewal (free)': 'Achieved Free',
+        'CBHI new membership': 'Achieved New Membership'
+    }, inplace=True)
 
-        # 4. DISPLAY
-        display_cols = ['Institution', 'Total Plan', 'Total Achieved', 'Performance %',
-                        'Plan Higher Paid', 'Achieved Higher Paid', 'Plan Medium Paid', 
-                        'Achieved Medium Paid', 'Plan Free', 'Achieved Free', 
-                        'Plan New Membership', 'Achieved New Membership']
-        
-        st.dataframe(df_final[display_cols], use_container_width=True)
-        
-        csv = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download CBHI Performance Report",
-            data=csv,
-            file_name="CBHI_Performance_Report.csv",
-            mime="text/csv"
-        )
+    # 2. PREPARE PLAN DATA
+    plan_data = pd.DataFrame([
+        {'Institution': k, 
+         'Plan Higher Paid': v['higher paid'],
+         'Plan Medium Paid': v['medium paid'],
+         'Plan Free': v['free'],
+         'Plan New Membership': v['new membership']}
+        for k, v in CBHI_PLAN.items()
+    ])
+    
+    # 3. MERGE AND CALCULATE
+    df_final = pd.merge(plan_data, df_aggregated, on='Institution', how='left').fillna(0)
+    
+    df_final['Total Plan'] = df_final['Plan Higher Paid'] + df_final['Plan Medium Paid'] + df_final['Plan Free'] + df_final['Plan New Membership']
+    df_final['Total Achieved'] = df_final['Achieved Higher Paid'] + df_final['Achieved Medium Paid'] + df_final['Achieved Free'] + df_final['Achieved New Membership']
+
+    df_final['Performance %'] = (df_final['Total Achieved'] / df_final['Total Plan']) * 100
+    df_final['Performance %'] = df_final['Performance %'].apply(lambda x: f"{x:,.1f}%")
+
+    # 4. DISPLAY
+    display_cols = ['Institution', 'Total Plan', 'Total Achieved', 'Performance %',
+                    'Plan Higher Paid', 'Achieved Higher Paid', 'Plan Medium Paid', 
+                    'Achieved Medium Paid', 'Plan Free', 'Achieved Free', 
+                    'Plan New Membership', 'Achieved New Membership']
+    
+    st.dataframe(df_final[display_cols], use_container_width=True)
+    
+    csv = df_final.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download CBHI Performance Report",
+        data=csv,
+        file_name="CBHI_Performance_Report.csv",
+        mime="text/csv"
+    )
